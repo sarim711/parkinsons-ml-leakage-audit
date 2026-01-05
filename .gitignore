@@ -1,0 +1,22 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyc
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+
+# Data (Keep structure, ignore files)
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+models/checkpoints/*
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE settings
+.vscode/
