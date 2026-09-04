@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite it as below."
+title: "Parkinson's Telemonitoring — Severity Models"
+authors:
+  - family-names: "Shah"
+    given-names: "Syed Sarim Ali"
+version: "1.0.0"
+date-released: "2026-09-04"
+license: MIT
+references:
+  - type: data
+    title: "Parkinsons Telemonitoring Data Set"
+    authors:
+      - family-names: "Tsanas"
+        given-names: "Athanasios"
+      - family-names: "Little"
+        given-names: "Max A."
+      - family-names: "McSharry"
+        given-names: "Patrick E."
+      - family-names: "Ramig"
+        given-names: "Lorraine O."
+    year: 2010
+    notes: "UCI Machine Learning Repository. Accurate telemonitoring of Parkinson's disease progression by non-invasive speech tests, IEEE Transactions on Biomedical Engineering."
