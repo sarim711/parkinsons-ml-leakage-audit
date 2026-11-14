@@ -8,11 +8,13 @@ Usage:
     python neural.py mlp2       # 2-class MLP            (39 -> 128 -> 64 -> 2)
 
 Training: AdamW + cosine LR schedule + gradient clipping, class-weighted cross-entropy,
-features standardized per fold. Results printed as mean ± sample std across folds.
+features standardized per fold. Results are printed as mean ± sample std across folds
+and the model's row is written to results/results_neural.csv (--out to change the folder).
 
 Importing this module has no global side effects: the warning filter and the torch
 thread count are applied inside main(), i.e. only when it is run as a script.
 """
+import os
 import sys
 import warnings
 
@@ -25,7 +27,7 @@ from sklearn.metrics import accuracy_score, f1_score, balanced_accuracy_score, r
 
 import preprocessing as P
 
-USAGE = "usage: python neural.py {mlp3|mlpdeep|attn|mlp2}"
+USAGE = "usage: python neural.py {mlp3|mlpdeep|attn|mlp2} [--out results]"
 
 # Thread count used to produce the reported numbers. Applied in main() only.
 TORCH_NUM_THREADS = 4
@@ -70,7 +72,7 @@ class FeatureAttention(nn.Module):
 
 
 def train_eval(kind, y, n_out, folds, Xv, hidden, dropout, epochs, lr=2e-3):
-    acc, f1, bacc, auc = [], [], [], []
+    acc, f1, bacc, auc, f1_sev = [], [], [], [], []
     for tr, te in folds:
         seed_all()
         sc = StandardScaler()
@@ -106,20 +108,63 @@ def train_eval(kind, y, n_out, folds, Xv, hidden, dropout, epochs, lr=2e-3):
         bacc.append(balanced_accuracy_score(yte, pred))
         if n_out == 2:
             auc.append(roc_auc_score(yte, prob[:, 1]) if len(np.unique(yte)) > 1 else 0.5)
-    sd = lambda x: np.std(x, ddof=1)
-    out = (f"acc={np.mean(acc):.3f}±{sd(acc):.3f} f1={np.mean(f1):.3f}±{sd(f1):.3f} "
-           f"bacc={np.mean(bacc):.3f}±{sd(bacc):.3f}")
+        else:
+            f1_sev.append(f1_score(yte, pred, labels=[2], average="macro", zero_division=0))
+    sd = lambda x: float(np.std(x, ddof=1))
+    res = {"accuracy": float(np.mean(acc)), "accuracy_std": sd(acc),
+           "macro_f1": float(np.mean(f1)), "macro_f1_std": sd(f1),
+           "balanced_acc": float(np.mean(bacc)), "balanced_acc_std": sd(bacc)}
     if n_out == 2:
-        out += f" auc={np.mean(auc):.3f}±{sd(auc):.3f}"
+        res["auc"] = float(np.mean(auc)); res["auc_std"] = sd(auc)
+    else:
+        res["f1_severe"] = float(np.mean(f1_sev))
+    return res
+
+
+def _format(res):
+    out = (f"acc={res['accuracy']:.3f}±{res['accuracy_std']:.3f} f1={res['macro_f1']:.3f}±{res['macro_f1_std']:.3f} "
+           f"bacc={res['balanced_acc']:.3f}±{res['balanced_acc_std']:.3f}")
+    if "auc" in res:
+        out += f" auc={res['auc']:.3f}±{res['auc_std']:.3f}"
+    else:
+        out += f" f1_severe={res['f1_severe']:.3f}"
     return out
+
+
+# which -> (label, task, kind, hidden layers, dropout, epochs)
+CONFIGS = {
+    "mlp3":    ("MLP 3-class",        "3class", "mlp",  [128, 64],      0.3, 40),
+    "mlpdeep": ("MLP_deeper 3-class", "3class", "mlp",  [256, 128, 64], 0.4, 50),
+    "attn":    ("FeatureAttention",   "3class", "attn", None,           None, 25),
+    "mlp2":    ("MLP 2-class",        "2class", "mlp",  [128, 64],      0.3, 40),
+}
+
+
+def _save(outdir, which, task, res):
+    """Add or replace this model's row in <outdir>/results_neural.csv."""
+    import pandas as pd
+
+    os.makedirs(outdir, exist_ok=True)
+    path = os.path.join(outdir, "results_neural.csv")
+    row = pd.DataFrame([{"model": which, "task": task, **res}])
+    if os.path.exists(path):
+        old = pd.read_csv(path)
+        row = pd.concat([old[old["model"] != which], row], ignore_index=True)
+    order = {name: i for i, name in enumerate(CONFIGS)}
+    row = row.sort_values("model", key=lambda s: s.map(order)).reset_index(drop=True)
+    row.to_csv(path, index=False)
+    print(f"  -> saved {path}")
 
 
 def main():
     if len(sys.argv) < 2:
         raise SystemExit(USAGE)
     which = sys.argv[1]
-    if which not in {"mlp3", "mlpdeep", "attn", "mlp2"}:
+    if which not in CONFIGS:
         raise SystemExit(USAGE)
+    outdir = "results"
+    if "--out" in sys.argv:
+        outdir = sys.argv[sys.argv.index("--out") + 1]
 
     # Script-only side effects, kept here so `import neural` stays clean.
     warnings.filterwarnings("ignore")
@@ -128,18 +173,12 @@ def main():
     df = P.load_raw()
     X, y_reg, y3, y2, groups = P.get_xy(df)
     Xv = X.values.astype(np.float32)
-    if which == "mlp3":
-        f = P.make_folds(df, y3, groups)
-        print("MLP 3-class      ", train_eval("mlp", y3, 3, f, Xv, [128, 64], 0.3, 40))
-    elif which == "mlpdeep":
-        f = P.make_folds(df, y3, groups)
-        print("MLP_deeper 3-class", train_eval("mlp", y3, 3, f, Xv, [256, 128, 64], 0.4, 50))
-    elif which == "attn":
-        f = P.make_folds(df, y3, groups)
-        print("FeatureAttention ", train_eval("attn", y3, 3, f, Xv, None, None, 25))
-    elif which == "mlp2":
-        f = P.make_folds(df, y2, groups)
-        print("MLP 2-class      ", train_eval("mlp", y2, 2, f, Xv, [128, 64], 0.3, 40))
+    label, task, kind, hidden, dropout, epochs = CONFIGS[which]
+    y, n_out = (y3, 3) if task == "3class" else (y2, 2)
+    folds = P.make_folds(df, y, groups)
+    res = train_eval(kind, y, n_out, folds, Xv, hidden, dropout, epochs)
+    print(f"{label:18s}", _format(res))
+    _save(outdir, which, task, res)
 
 
 if __name__ == "__main__":

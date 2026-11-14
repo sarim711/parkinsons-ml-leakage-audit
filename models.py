@@ -6,7 +6,7 @@ the study. Class balancing is applied via class_weight / scale_pos_weight / samp
 depending on what each library supports (see evaluate.py for how sample weights are passed).
 """
 import numpy as np
-from sklearn.linear_model import LogisticRegression, Ridge
+from sklearn.linear_model import LogisticRegression, Ridge, HuberRegressor
 from sklearn.svm import SVR
 from sklearn.ensemble import (RandomForestClassifier, ExtraTreesClassifier,
                               ExtraTreesRegressor, RandomForestRegressor,
@@ -55,6 +55,12 @@ def reg_ridge():
     # dense, well-conditioned problem) is deterministic. random_state only has
     # an effect for the "sag"/"saga" solvers, so it was a no-op here.
     return Ridge(alpha=1.0)
+
+
+def reg_huber():
+    # max_iter=10000: lbfgs needs several thousand iterations on this problem.
+    # At the earlier limit of 500 it stopped unconverged in every fold.
+    return HuberRegressor(epsilon=1.35, max_iter=10000)
 
 
 def reg_svr():
