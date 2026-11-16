@@ -21,13 +21,12 @@ jobs:
           python -m pip install --upgrade pip
           # Pinned runtime deps, so CI exercises the same versions used for the
           # reported results. torch is not installed: neural.py is optional and
-          # is not covered by these tests. imbalanced-learn and matplotlib are
-          # notebook-only and likewise not needed here.
+          # is not covered by these tests.
           pip install -r requirements.txt
           pip install pytest
 
       - name: Run tests
         # Verifies the two invariants the reported numbers depend on:
         # patient-disjoint folds, and train-only fitting of the in-fold
-        # transforms. Needs parkinsons_updrs.data, which is committed.
+        # transforms. Needs data/raw/parkinsons_updrs.data, which is committed.
         run: python -m pytest tests/ -v

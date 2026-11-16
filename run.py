@@ -96,20 +96,26 @@ def run_literature(df, X, y2, groups):
 
 def run_regression(df, X, y_reg, y2, groups):
     folds = P.make_folds(df, y2, groups)
+    # 39 features plus the 80 per-patient summary columns (119), for the last row only.
+    Xpat = pd.concat([X.reset_index(drop=True),
+                      P.patient_agg_features(df, groups).reset_index(drop=True)], axis=1)
     rows = []
-    # (name, factory, apply Yeo-Johnson)
+    # (name, design matrix, factory, apply Yeo-Johnson)
     specs = [
-        ("Ridge",                M.reg_ridge,             True),
-        ("SVR_RBF",              M.reg_svr,               True),
-        ("ExtraTrees",           M.reg_extra_trees,       False),
-        ("ExtraTrees_YeoJohnson", M.reg_extra_trees,      True),
-        ("RandomForest",         M.reg_random_forest,     False),
-        ("XGBoost",              M.reg_xgboost,           False),
-        ("LightGBM",             M.reg_lightgbm,          False),
-        ("GradientBoosting",     M.reg_gradient_boosting, False),
+        ("Ridge",                X,    M.reg_ridge,             True),
+        ("Huber",                X,    M.reg_huber,             True),
+        ("SVR_RBF",              X,    M.reg_svr,               True),
+        ("ExtraTrees",           X,    M.reg_extra_trees,       False),
+        ("ExtraTrees_YeoJohnson", X,   M.reg_extra_trees,       True),
+        ("RandomForest",         X,    M.reg_random_forest,     False),
+        ("XGBoost",              X,    M.reg_xgboost,           False),
+        ("LightGBM",             X,    M.reg_lightgbm,          False),
+        ("GradientBoosting",     X,    M.reg_gradient_boosting, False),
+        # Compare with the plain "ExtraTrees" row: same model, patient summaries added.
+        ("ExtraTrees_PatAgg",    Xpat, M.reg_extra_trees,       False),
     ]
-    for name, mk, yeo in specs:
-        r = E.evaluate_regression_threshold(X, y_reg, groups, folds, mk, yeo_johnson=yeo)
+    for name, Xd, mk, yeo in specs:
+        r = E.evaluate_regression_threshold(Xd, y_reg, groups, folds, mk, yeo_johnson=yeo)
         r["model"] = name; rows.append(r)
         print(f"[reg] {name:22s} mae={r['mae']:.2f} acc={r['accuracy']:.3f} "
               f"f1={r['macro_f1']:.3f} bacc={r['balanced_acc']:.3f} auc={r['auc']:.3f}")

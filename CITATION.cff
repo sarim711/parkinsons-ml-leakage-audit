@@ -4,6 +4,7 @@ title: "Parkinson's Telemonitoring — Severity Models"
 authors:
   - family-names: "Shah"
     given-names: "Syed Sarim Ali"
+repository-code: "https://github.com/sarim711/parkinsons-ml-leakage-audit"
 version: "1.0.0"
 date-released: "2026-09-04"
 license: MIT

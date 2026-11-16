@@ -51,8 +51,8 @@ def _fold_preprocess(Xtr, Xte, scale=False, yeo_johnson=False, pca=None):
         sc = StandardScaler(); Xtr = sc.fit_transform(Xtr); Xte = sc.transform(Xte)
     if yeo_johnson:
         # PowerTransformer defaults to standardize=True, so this also zero-means
-        # and unit-scales the features (relevant for Ridge / SVR, which are
-        # otherwise passed raw features).
+        # and unit-scales the features (relevant for Ridge / Huber / SVR, which
+        # are otherwise passed raw features).
         pt = PowerTransformer(method="yeo-johnson"); Xtr = pt.fit_transform(Xtr); Xte = pt.transform(Xte)
     if pca is not None:
         pc = PCA(n_components=pca, random_state=0); Xtr = pc.fit_transform(Xtr); Xte = pc.transform(Xte)

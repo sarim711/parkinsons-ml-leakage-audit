@@ -5,7 +5,8 @@ Tests for the two invariants the repository's central claim rests on:
   2. the Yeo-Johnson transform is fitted on training rows only
 
 If either regresses, every reported number becomes an overestimate, so these are
-asserted rather than assumed.
+asserted rather than assumed. Section 3 checks that the threshold search in
+tune.py keeps the same guarantee on its inner folds.
 """
 import numpy as np
 import pytest
@@ -15,6 +16,7 @@ from sklearn.preprocessing import PowerTransformer
 
 import preprocessing as P
 import evaluate as E
+import tune as T
 
 
 # --------------------------------------------------------------- 1. fold hygiene
@@ -113,7 +115,7 @@ def test_yeo_johnson_lambdas_match_a_train_only_fit(data):
 
 
 def test_power_transformer_standardizes_by_default():
-    """Ridge / SVR rely on this: they are never explicitly scaled.
+    """Ridge / Huber / SVR rely on this: they are never explicitly scaled.
 
     run.py passes them yeo_johnson=True and no scale=True, so their
     standardization comes entirely from PowerTransformer's default.
@@ -133,3 +135,48 @@ def test_scale_and_pca_are_also_train_only(data):
     a1, _ = E._fold_preprocess(Xtr, Xte, scale=True, pca=20)
     a2, _ = E._fold_preprocess(Xtr, Xte * 1000.0, scale=True, pca=20)
     np.testing.assert_allclose(a1, a2, rtol=0, atol=0)
+
+
+# ------------------------------------------------- 3. threshold search in tune.py
+def test_threshold_inner_folds_stay_inside_training_patients(data):
+    """Inner folds share no patient, and never reach an outer-test patient."""
+    df, X, y_reg, y3, y2, groups = data
+    for k, (tr, te) in enumerate(P.make_folds(df, y2, groups)):
+        inner = T._inner_folds(y2, groups, tr)
+        assert len(inner) == T.N_INNER_SPLITS
+        for itr, ite in inner:
+            assert set(groups[tr][itr]) & set(groups[tr][ite]) == set()
+            assert set(groups[tr][ite]) & set(groups[te]) == set(), f"outer fold {k}"
+        held_out = np.concatenate([ite for _, ite in inner])
+        assert sorted(held_out) == list(range(len(tr))), "every training row predicted exactly once"
+
+
+def test_threshold_inner_predictions_cover_every_training_row(data):
+    df, X, y_reg, y3, y2, groups = data
+    tr, _ = P.make_folds(df, y2, groups)[0]
+    oof = T._inner_oof_predictions(
+        X.values, y_reg, y2, groups, tr,
+        make_model=lambda: ExtraTreesRegressor(n_estimators=2, random_state=P.SEED))
+    assert oof.shape == (len(tr),) and not np.isnan(oof).any()
+
+
+def test_patient_average_baseline_never_sees_the_recording_it_predicts(data):
+    """Changing one recording's own score must not change its own prediction."""
+    import analyses as A
+    df, X, y_reg, y3, y2, groups = data
+    y = y_reg.astype(float)
+    y_moved = y.copy()
+    y_moved[0] += 100.0
+    np.testing.assert_allclose(A.patient_average_baseline(y, groups)[0],
+                               A.patient_average_baseline(y_moved, groups)[0])
+    same_patient = np.flatnonzero(groups == groups[0])[1]
+    assert A.patient_average_baseline(y_moved, groups)[same_patient] != \
+        A.patient_average_baseline(y, groups)[same_patient]
+
+
+def test_select_threshold_prefers_the_clinical_cutoff_on_ties():
+    """Perfect predictions make every cut-off in (max mild, min not-mild] optimal."""
+    y = np.array([5.0, 12.0, 18.0, 25.0, 31.0, 38.0])
+    cut, scores = T._select_threshold(y, y.copy())
+    assert scores.max() == 1.0
+    assert cut == 20.0

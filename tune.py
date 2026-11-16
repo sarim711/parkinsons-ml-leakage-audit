@@ -1,16 +1,18 @@
 """
-Hyperparameter provenance and nested cross-validation.
+Hyperparameter provenance, nested cross-validation and threshold tuning.
 
 This module is NOT part of the default path. Nothing in run.py imports it, and
 none of the reported results depend on it. The hyperparameters used for the
 reported numbers are the literals in models.py; this file exists to document
 where they came from and to quantify how optimistic the reported numbers are as
-a consequence of having selected them.
+a consequence of having selected them. It also checks whether the fixed clinical
+cut-off of 20 could be improved by choosing it on training patients only.
 
 Usage:
     python tune.py provenance    # what is and is not known about the selection
     python tune.py sensitivity   # how much the choice actually matters (~6 min)
     python tune.py nested        # nested CV for the final pipeline (~4 min)
+    python tune.py threshold     # cut-off chosen on inner folds vs fixed 20 (~3 min)
 
 Three different things live here, and they must not be confused:
 
@@ -44,7 +46,7 @@ import preprocessing as P
 import models as M
 import evaluate as E
 
-USAGE = "usage: python tune.py {provenance|sensitivity|nested} [--out results]"
+USAGE = "usage: python tune.py {provenance|sensitivity|nested|threshold} [--out results]"
 
 
 # --------------------------------------------------------------------------
@@ -149,11 +151,12 @@ def _make_candidate(cfg):
     return ExtraTreesRegressor(random_state=P.SEED, n_jobs=-1, **cfg)
 
 
-def _inner_select(Xv, y_reg, y2, groups, tr):
-    """Choose a config using only the training patients of one outer fold.
+def _inner_folds(y2, groups, tr):
+    """Patient-disjoint inner folds over the training rows of one outer fold.
 
-    Inner splitter is StratifiedGroupKFold grouped by subject_id, so the
-    selection itself is patient-disjoint. No outer-test row is touched.
+    Indices are positions within `tr`. Inner splitter is StratifiedGroupKFold
+    grouped by subject_id, so any selection made on these folds is itself
+    patient-disjoint. No outer-test row is touched.
     """
     g_tr = groups[tr]
     strat_tr = P._patient_majority(y2[tr], g_tr)
@@ -161,6 +164,12 @@ def _inner_select(Xv, y_reg, y2, groups, tr):
     inner = list(sgkf.split(np.zeros(len(tr)), strat_tr, g_tr))
     for j, (itr, ite) in enumerate(inner):
         assert not np.intersect1d(g_tr[itr], g_tr[ite]).size, f"inner fold {j} leaks patients"
+    return inner
+
+
+def _inner_select(Xv, y_reg, y2, groups, tr):
+    """Choose a config using only the training patients of one outer fold."""
+    inner = _inner_folds(y2, groups, tr)
 
     scores = []
     for cfg in NESTED_CANDIDATES:
@@ -327,6 +336,113 @@ def run_sensitivity(outdir):
     return frame
 
 
+# --------------------------------------------------------------------------
+# 4. Decision threshold chosen on inner folds
+# --------------------------------------------------------------------------
+# The reported pipeline turns its continuous motor-UPDRS prediction into the
+# binary label with the fixed clinical cut-off of 20. This checks whether a
+# cut-off chosen from the training patients alone would classify better.
+#
+#   grid      : THRESHOLD_GRID, 10 to 30 in steps of 0.5
+#   selection : maximise macro-F1 on inner out-of-fold predictions of the
+#               training patients (the same patient-disjoint inner folds as
+#               `nested`); ties go to the cut-off nearest 20
+#   model     : models.py:reg_extra_trees + Yeo-Johnson, the reported pipeline
+#   protocol  : the same five patient-disjoint outer folds used for reporting
+#
+# The label itself is always defined at 20; only the cut-off applied to the
+# prediction moves. MAE and AUC do not depend on it, so they are not repeated.
+THRESHOLD_GRID = np.round(np.arange(10.0, 30.0 + 1e-9, 0.5), 1)
+
+
+def _inner_oof_predictions(Xv, y_reg, y2, groups, tr, make_model=M.reg_extra_trees):
+    """Out-of-fold prediction for every training row of one outer fold.
+
+    Each training patient is predicted by a model fitted on the other inner
+    folds, so no patient is scored by a model that saw it.
+    """
+    oof = np.full(len(tr), np.nan)
+    for itr, ite in _inner_folds(y2, groups, tr):
+        a, b = E._fold_preprocess(Xv[tr][itr], Xv[tr][ite], yeo_johnson=True)
+        model = make_model()
+        model.fit(a, y_reg[tr][itr])
+        oof[ite] = model.predict(b)
+    return oof
+
+
+def _select_threshold(y_reg, pred):
+    """Cut-off in THRESHOLD_GRID with the highest macro-F1; ties go to the value nearest 20."""
+    yt = (y_reg >= E.THRESHOLD).astype(int)
+    scores = np.array([f1_score(yt, (pred >= t).astype(int), average="macro")
+                       for t in THRESHOLD_GRID])
+    best = np.flatnonzero(scores == scores.max())
+    pick = best[np.argmin(np.abs(THRESHOLD_GRID[best] - E.THRESHOLD))]
+    return float(THRESHOLD_GRID[pick]), scores
+
+
+def run_threshold(outdir):
+    df = P.load_raw()
+    X, y_reg, y3, y2, groups = P.get_xy(df)
+    Xv = X.values
+    outer = P.make_folds(df, y2, groups)   # the same five reporting folds
+
+    print(f"loaded {len(df)} recordings, {df['subject_id'].nunique()} patients, "
+          f"{X.shape[1]} features")
+    print(f"\n=== Threshold tuning: 5 patient-disjoint outer folds x "
+          f"{N_INNER_SPLITS} inner patient-disjoint folds x {len(THRESHOLD_GRID)} cut-offs ===")
+    print(f"inner selection maximises macro-F1 over cut-offs {THRESHOLD_GRID[0]:g} to "
+          f"{THRESHOLD_GRID[-1]:g}; the fixed cut-off is {E.THRESHOLD:g}\n")
+
+    rows = []
+    for k, (tr, te) in enumerate(outer):
+        assert not np.intersect1d(groups[tr], groups[te]).size, f"outer fold {k} leaks patients"
+        oof = _inner_oof_predictions(Xv, y_reg, y2, groups, tr)
+        cut, _ = _select_threshold(y_reg[tr], oof)
+
+        a, b = E._fold_preprocess(Xv[tr], Xv[te], yeo_johnson=True)
+        model = M.reg_extra_trees()
+        model.fit(a, y_reg[tr])
+        pred = model.predict(b)
+
+        yt = (y_reg[te] >= E.THRESHOLD).astype(int)
+        row = {"fold": k, "selected_threshold": cut}
+        for label, t in (("fixed", E.THRESHOLD), ("tuned", cut)):
+            yh = (pred >= t).astype(int)
+            row[f"{label}_accuracy"] = accuracy_score(yt, yh)
+            row[f"{label}_macro_f1"] = f1_score(yt, yh, average="macro")
+            row[f"{label}_balanced_acc"] = balanced_accuracy_score(yt, yh)
+        rows.append(row)
+        print(f"  fold {k}: selected cut-off {cut:4.1f}  "
+              f"MacroF1 fixed={row['fixed_macro_f1']:.3f} tuned={row['tuned_macro_f1']:.3f}  "
+              f"BalAcc fixed={row['fixed_balanced_acc']:.3f} tuned={row['tuned_balanced_acc']:.3f}")
+
+    frame = pd.DataFrame(rows)
+    sd = lambda v: float(np.std(v, ddof=1))
+    summary = []
+    for label in ("fixed", "tuned"):
+        s = {"protocol": "fixed_threshold_20" if label == "fixed" else "tuned_on_inner_folds"}
+        for m in ("accuracy", "macro_f1", "balanced_acc"):
+            s[m] = float(frame[f"{label}_{m}"].mean())
+            s[f"{m}_std"] = sd(frame[f"{label}_{m}"])
+        summary.append(s)
+    summary = pd.DataFrame(summary)
+
+    print("\n=== Fixed vs tuned cut-off (same outer folds, same predictions) ===")
+    for _, s in summary.iterrows():
+        print(f"  {s['protocol']:22s} Acc={s['accuracy']:.3f}  MacroF1={s['macro_f1']:.3f}  "
+              f"BalAcc={s['balanced_acc']:.3f}")
+    print(f"  selected cut-offs: {frame['selected_threshold'].tolist()}")
+
+    os.makedirs(outdir, exist_ok=True)
+    per_fold = os.path.join(outdir, "threshold_folds.csv")
+    frame.to_csv(per_fold, index=False)
+    path = os.path.join(outdir, "threshold_summary.csv")
+    summary.to_csv(path, index=False)
+    print(f"  -> saved {per_fold}")
+    print(f"  -> saved {path}")
+    return frame, summary
+
+
 def main():
     if len(sys.argv) < 2:
         raise SystemExit(USAGE)
@@ -340,6 +456,8 @@ def main():
         run_sensitivity(outdir)
     elif cmd == "nested":
         run_nested(outdir)
+    elif cmd == "threshold":
+        run_threshold(outdir)
     else:
         raise SystemExit(USAGE)
 

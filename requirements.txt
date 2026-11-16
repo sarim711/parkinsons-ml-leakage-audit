@@ -9,12 +9,12 @@ scikit-learn==1.9.0
 xgboost==3.3.0
 lightgbm==4.7.0
 
+# Needed by analyses.py (SMOTE section), figures.py and the notebook
+imbalanced-learn==0.14.2
+matplotlib==3.11.0
+
 # Optional, only needed for neural.py (PyTorch models)
 # torch==2.13.0
-
-# Optional, only needed to re-run parkinsons_leakage_analysis.ipynb
-# imbalanced-learn==0.14.2
-# matplotlib==3.11.0
 
 # Test-only, not needed to reproduce any reported number
 # pytest

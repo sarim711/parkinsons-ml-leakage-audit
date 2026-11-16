@@ -31,7 +31,9 @@ the benchmark actually supports once patients are held out properly.
   - UCI Parkinson's Telemonitoring, **5,875 sustained-vowel recordings** from **42 early-stage
     patients** recorded over six months.
   - Available from the
-    [UCI Machine Learning Repository](https://archive.ics.uci.edu/dataset/189/parkinsons+telemonitoring).
+    [UCI Machine Learning Repository](https://archive.ics.uci.edu/dataset/189/parkinsons+telemonitoring)
+    (doi:10.24432/C5ZS3N) under a CC BY 4.0 license. The MIT license of this repository covers the
+    code only.
 
 - **Target Variable**:
 
@@ -70,12 +72,15 @@ the benchmark actually supports once patients are held out properly.
   so **no patient appears in both training and test**. This is asserted at run time in
   `evaluate.py` and independently in `tests/`.
 - All transforms are **fitted on the training fold only**. `PowerTransformer` defaults to
-  `standardize=True`, so Ridge and SVR are standardised implicitly by the Yeo-Johnson step.
+  `standardize=True`, so Ridge, Huber and SVR are standardised implicitly by the Yeo-Johnson step.
 - **Regression then threshold**: regressors predict continuous `motor_UPDRS`, thresholded at
   **20** to recover the binary label.
-- Models span linear (Logistic Regression, Ridge, SVR), tree ensembles (Random Forest,
+- Models span linear (Logistic Regression, Ridge, Huber, SVR), tree ensembles (Random Forest,
   Extra Trees), gradient boosting (XGBoost, LightGBM, Gradient Boosting) and neural networks
   (MLP, deeper MLP, FT-Transformer-lite).
+- Two baselines use no voice features: the **overall average** (the training-fold mean for
+  every recording) and the **patient average** (the mean of the same patient's other
+  recordings, i.e. what knowing the patient alone gives).
 - Metrics are mean and sample standard deviation (ddof=1) across the 5 folds. Seed fixed at
   **42**, hyperparameters fixed as literals in `models.py`, so results reproduce on every run.
 
@@ -96,6 +101,19 @@ Under the row-level protocol, **all 42 patients appear in both training and test
 fold**. Under the patient-disjoint protocol the count is zero. The row-level figures fall in
 the range commonly reported for this benchmark.
 
+The row-level score does not need the voice at all. Given only `age`, `sex` and `test_time`,
+the same model under the row-level split reaches MAE `0.04` and R² `0.996`, better than with all
+39 features (MAE `0.61`, R² `0.981`). The voice measures alone reach MAE `5.09` and R² `0.38`.
+The scores are interpolated in time between clinic visits, so knowing the patient and the date
+nearly fixes the label.
+
+### Baselines
+
+- Predicting the training-fold mean for every recording gives MAE `7.01`. The best pipeline
+  (MAE `7.38`, RMSE `9.38`, R² `-0.42`) does not beat it.
+- The patient-average baseline reaches MAE `1.75` and R² `0.916` from patient identity alone,
+  because scores vary far less within a patient (SD `2.08`) than between patients (SD `7.88`).
+
 ### Model Performance
 
 - Best pipeline under honest evaluation: **Extra Trees regressor with Yeo-Johnson**, thresholded
@@ -103,17 +121,54 @@ the range commonly reported for this benchmark.
 - It does not beat plain Extra Trees on AUC (`0.629` against `0.633`), and per-fold AUC ranges
   from `0.798` down to `0.370`, so one held-out patient group is predicted worse than chance.
 - Direct binary classification is weaker than regression then threshold, topping out near
-  AUC `0.55`.
-- 3-class macro-F1 sits between `0.29` and `0.37` for every model family. The severe class,
-  present in only 6 patients, is the bottleneck.
-- Per-model numbers for every track are written to `results/*.csv` by `run.py`.
+  AUC `0.55`. Over 10 further fold assignments the regression route leads in all 10, by AUC
+  `0.081` on average, but the 95% interval (`-0.030` to `0.191`) includes zero.
+- 3-class macro-F1 sits between `0.27` and `0.37` for every model family, neural networks
+  included. The severe class, present in only 6 patients, is the bottleneck.
+- Neural networks offer no consistent advantage over the tree ensembles. Huber regression is
+  run to convergence and gives MAE `9.93`.
+- Per-model numbers for every track are written to `results/*.csv`.
+
+### What the Voice Adds
+
+- On the same five folds, `age`, `sex` and `test_time` alone give AUC `0.634`, all 39 features
+  `0.629`, and the voice measures alone `0.520`.
+- Over 50 folds (10 further fold assignments), voice only minus all features is `-0.124`
+  (95% CI `-0.330` to `0.081`), and demographics minus all is `0.024` (95% CI `-0.021` to `0.069`).
+
+### Patients versus Recordings
+
+- Keeping every training patient and capping their recordings, AUC rises from `0.56` at 10
+  recordings per patient to `0.63` at 60, then stays flat.
+- Holding the training volume at 800 recordings and varying the number of patients, AUC rises
+  from `0.51` with 8 patients to `0.61` with 33. At about 2,000 recordings it rises from `0.52`
+  to `0.63`.
+- The gain is of the same order as the spread between random draws of 8 patients (SD `0.08`),
+  so it shows a direction rather than a precise effect.
 
 ### Patient-Aggregate Features: a Negative Result
 
 - Appending the 80-column patient-aggregate block (119 features total) **hurts** performance,
-  giving AUC `0.459` to `0.489` against `0.553` for the 39-feature baseline.
+  giving AUC `0.459` to `0.489` against `0.553` for the 39-feature baseline. For the Extra Trees
+  regressor, AUC falls from `0.633` to `0.573`.
+- Under the row-level split the same block looks like a large improvement (MAE `0.56` to
+  `0.08`).
 - The aggregates act as a per-patient fingerprint that the trees memorise and cannot transfer
   to unseen patients. This is a common route by which leakage re-enters this benchmark.
+
+### Calibration with a Patient's Own Recordings
+
+- Shifting the predictions by the mean error on `k` of a new patient's recordings with known
+  scores lowers MAE from `7.30` to `2.94` with one recording and `2.20` with 20, when those
+  recordings are drawn at random from the six months.
+- With the patient's first recordings in time, as at the start of monitoring, MAE falls only to
+  about `3.6`.
+- Predicting the mean of the same calibration scores, with no model, does better at every `k`.
+
+### Minority-Class Oversampling
+
+- SMOTE inside each training fold raises severe-class F1 from `0.150` to `0.216` and macro-F1
+  from `0.369` to `0.390`. It adds synthetic recordings, not the extra patients the task needs.
 
 ### Hyperparameter Provenance
 
@@ -123,13 +178,16 @@ the range commonly reported for this benchmark.
   `0.020` across the whole grid, against `6.77` and `0.369` for the splitter choice, and the
   shipped configuration ranks 7th of 16 on both metrics. Nested cross-validation gives MAE
   `7.376` against `7.384` non-nested, so selection optimism is negligible.
+- Tuning the cut-off on inner folds does not help either: the chosen cut-offs range from `13.5`
+  to `23.5` and lower macro-F1 from `0.539` to `0.471`, so the clinical cut-off of 20 is kept.
 
 ### Conclusion
 
 Once patients are held out properly, the voice features in this dataset support only weak
-severity prediction for an unseen patient, around AUC `0.63`. The near-perfect scores reported
-elsewhere are a property of the evaluation protocol, not of the models. Any result on this
-benchmark that does not state its splitter should be read as the row-level figure.
+severity prediction for an unseen patient, around AUC `0.63`, and add little beyond age. The
+near-perfect scores reported elsewhere are a property of the evaluation protocol, not of the
+models, and can be reached without any voice feature. Any result on this benchmark that does
+not state its splitter should be read as the row-level figure.
 
 ---
 
@@ -149,27 +207,38 @@ benchmark that does not state its splitter should be read as the row-level figur
   - Orchestrator. Runs a section, prints metrics, and writes CSV or JSON to `results/`.
 
 - `tune.py`
-  - Hyperparameter provenance, the sensitivity sweep, and nested cross-validation. Not on the
-    default path and not required to reproduce any reported number.
+  - Hyperparameter provenance, the sensitivity sweep, nested cross-validation, and threshold
+    tuning. Not on the default path and not required to reproduce any reported number.
 
 - `neural.py`
   - PyTorch models: MLP, deeper MLP, and an FT-Transformer-lite feature-attention model.
-    Optional, requires `torch`.
+    Writes `results/results_neural.csv`. Optional, requires `torch`.
+
+- `analyses.py`
+  - Supporting analyses: dataset description, baselines, the row-level split with and without
+    voice, regression against classification, feature groups, patients versus recordings,
+    calibration, and SMOTE.
+
+- `figures.py`
+  - Draws the paper's four figures from the CSVs in `results/`.
 
 - `parkinsons_leakage_analysis.ipynb`
-  - Single self-contained notebook covering the full analysis, including the patient-mean
-    oracle, a diversity ablation, the aggregation negative result, and few-shot
-    personalisation. Committed with outputs.
+  - Single self-contained notebook covering the full exploratory analysis, including the
+    patient-mean oracle, a diversity ablation, the aggregation negative result, and few-shot
+    personalisation. Committed with outputs. The scripts above are the reference for reported
+    numbers; the notebook's Huber, patients-versus-recordings and SMOTE cells use earlier
+    settings.
 
 - `tests/test_folds.py`
-  - Asserts that folds are patient-disjoint and that transforms are fitted on training rows
-    only. Run in CI on every push.
+  - Asserts that folds are patient-disjoint, that transforms are fitted on training rows only,
+    that the threshold search stays inside the training patients, and that the patient-average
+    baseline never sees the recording it predicts. Run in CI on every push.
 
 - `data/raw/`
   - The dataset and its UCI variable descriptions.
 
-- `results/`
-  - Generated by `run.py` and `tune.py`. Not committed.
+- `results/` and `figures/`
+  - Generated by the scripts. Not committed.
 
 ---
 
@@ -196,23 +265,45 @@ benchmark that does not state its splitter should be read as the row-level figur
    python run.py regression-final
    ```
 
-5. Inspect hyperparameter provenance and selection optimism:
+5. Inspect hyperparameter provenance, selection optimism and threshold tuning:
 
    ```bash
    python tune.py provenance
    python tune.py sensitivity
    python tune.py nested
+   python tune.py threshold
    ```
 
-6. Run the tests:
+6. Run the neural models (optional):
+
+   ```bash
+   pip install torch
+   python neural.py mlp3
+   python neural.py mlpdeep
+   python neural.py attn
+   python neural.py mlp2
+   ```
+
+7. Run the supporting analyses and draw the figures. `analyses.py all` takes over an hour on 4
+   cores; sections can also be run one at a time (`describe`, `baselines`, `rowlevel`,
+   `scoreclass`, `features`, `patients`, `calibration`, `smote`). `figures.py` needs
+   `run.py leakage-demo` and `analyses.py all` first:
+
+   ```bash
+   python analyses.py all
+   python figures.py
+   ```
+
+8. Run the tests:
 
    ```bash
    pip install pytest
    python -m pytest tests/ -v
    ```
 
-Results are written to `results/`, one CSV per section. The tree ensembles use 500 to 700 trees
-and are CPU-heavy, so run sections individually rather than `all` if you are core-limited.
+Results are written to `results/`, one CSV per section, and figures to `figures/`. The tree
+ensembles use 500 to 700 trees and are CPU-heavy, so run sections individually rather than
+`all` if you are core-limited.
 
 Reported numbers were produced with Python 3.14.6 and the exact versions pinned in
 `requirements.txt`.
